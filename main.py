@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import random
-from dataclasses import dataclass
-
+import chex
+import jax
+import jax.numpy as jnp
 import pygame
+from beartype import beartype
+from jaxtyping import Array, Float, jaxtyped
 
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 800
@@ -17,57 +19,64 @@ BACKGROUND_COLOR = pygame.Color(48, 48, 48)
 WHITE = pygame.Color(255, 255, 255)
 
 
-@dataclass
-class Bird:
-    position: pygame.Vector2
-    orientation: float
-    scale: float
-    color: pygame.Color
+@chex.dataclass
+@jaxtyped(typechecker=beartype)
+class Flock:
+    positions: Float[Array, "bird 2"]
+    velocities: Float[Array, "bird 2"]
 
 
-def random_bird() -> Bird:
-    return Bird(
-        position=pygame.Vector2(
-            random.uniform(0, WINDOW_WIDTH),
-            random.uniform(0, WINDOW_HEIGHT),
-        ),
-        orientation=random.uniform(0, 360),
-        scale=random.uniform(0.8, 1.2),
-        color=pygame.Color(
-            random.randrange(256),
-            random.randrange(256),
-            random.randrange(256),
-        ),
+def initialize_flock(rng_key_1, rng_key_2) -> Flock:
+    ps = jax.random.uniform(
+        rng_key_1,
+        shape=(BIRD_COUNT, 2),
+        minval=jnp.array([0, 0]),
+        maxval=jnp.array([WINDOW_WIDTH, WINDOW_HEIGHT]),
     )
+    vs = jax.random.uniform(
+        rng_key_2,
+        shape=(BIRD_COUNT, 2),
+        minval=jnp.array([-1, -1]),
+        maxval=jnp.array([1, 1]),
+    )
+    eps = 1e-8
+    vs = vs / jnp.maximum(jnp.linalg.norm(vs, axis=-1, keepdims=True), eps)
+
+    return Flock(positions=ps, velocities=vs)
 
 
-def triangle_points(
-    position: pygame.Vector2, orientation: float, size: float
-) -> list[pygame.Vector2]:
-    local_points = [
-        pygame.Vector2(size * 0.70, 0.0),
-        pygame.Vector2(-size * 0.45, -size * 0.30),
-        pygame.Vector2(-size * 0.45, size * 0.30),
-    ]
+def draw_flock(surface: pygame.Surface, flock: Flock) -> None:
+    def triangle_points(
+        position: pygame.Vector2, orientation: float, size: float
+    ) -> list[pygame.Vector2]:
+        local_points = [
+            pygame.Vector2(size * 0.70, 0.0),
+            pygame.Vector2(-size * 0.45, -size * 0.30),
+            pygame.Vector2(-size * 0.45, size * 0.30),
+        ]
 
-    return [position + point.rotate(orientation) for point in local_points]
+        return [position + point.rotate(orientation) for point in local_points]
 
+    for bird_pos, bird_velocity in zip(flock.positions, flock.velocities):
+        position = pygame.Vector2(float(bird_pos[0]), float(bird_pos[1]))
+        orientation = float(
+            jnp.degrees(jnp.arctan2(bird_velocity[1], bird_velocity[0]))
+        )
 
-def draw_birds(surface: pygame.Surface, birds: list[Bird]) -> None:
-    for bird in birds:
-        size = BIRD_BASE_SIZE * bird.scale
         pygame.draw.polygon(
             surface,
-            bird.color,
-            triangle_points(bird.position, bird.orientation, size),
+            (255, 0, 0),
+            triangle_points(position, orientation, BIRD_BASE_SIZE),
         )
 
 
-def update_birds(dt: float, birds: list[Bird]) -> None:
+def update_flock(dt: float, flock: Flock) -> Flock:
+    flock.positions = flock.positions + flock.velocities * dt * 100
     # separation: steer to avoid crowding local flockmates
     # alignment: steer towards the average heading of local flockmates
     # cohesion: steer to move towards the average position of local flockmates
-    pass
+
+    return flock
 
 
 def draw_fps(
@@ -85,7 +94,17 @@ def main() -> None:
         pygame.display.set_caption("Flock Field")
         clock = pygame.time.Clock()
         font = pygame.font.Font(None, 24)
-        birds = [random_bird() for _ in range(BIRD_COUNT)]
+        # birds = [random_bird() for _ in range(BIRD_COUNT)]
+
+        rng_key = jax.random.key(10)
+        rng_key, k1 = jax.random.split(rng_key)
+        rng_key, k2 = jax.random.split(rng_key)
+
+        flock = initialize_flock(k1, k2)
+
+        print(flock.positions)
+        print()
+        print(flock.velocities)
 
         running = True
         while running:
@@ -97,10 +116,10 @@ def main() -> None:
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     running = False
 
-            update_birds(dt, birds)
+            flock = update_flock(dt, flock)
 
             screen.fill(BACKGROUND_COLOR)
-            draw_birds(screen, birds)
+            draw_flock(screen, flock)
             draw_fps(screen, font, clock)
             pygame.display.flip()
     finally:

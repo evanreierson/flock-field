@@ -1,4 +1,5 @@
 .DS_STORE
+.zed
 
 # Python-generated files
 __pycache__/

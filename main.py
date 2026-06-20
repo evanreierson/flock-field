@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import time
+from collections import deque
 
 import chex
 import jax
@@ -13,11 +13,13 @@ from jaxtyping import Array, Float, jaxtyped
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 800
 
-BIRD_COUNT = 1000
-BIRD_BASE_SIZE = 16.0
+BIRD_COUNT = 300
+TRAIL_WIDTH = 2
+TRAIL_HISTORY_LENGTH = 200
+MIN_TRAIL_ALPHA = 12
+MAX_TRAIL_ALPHA = 220
 BIRD_VELOCITY = 100.0
 FPS = 60
-TIMING_REPORT_INTERVAL = 1.0
 
 # Separation field tuning. Each bird contributes a Gaussian "hill" to a
 # scalar height field. Birds steer down the gradient of that field.
@@ -43,11 +45,14 @@ NOISE_SCROLL_SPEED = 0.35
 NOISE_STRENGTH = 1.5
 
 MAX_TURN_FORCE = 8.0
-HEIGHT_FIELD_CONTRAST = 255.0
 EPS = 1e-8
 
 BACKGROUND_COLOR = pygame.Color(48, 48, 48)
 WHITE = pygame.Color(255, 255, 255)
+
+# RGB color min and max to sample from (0-1.0)
+COLOR_MIN = jnp.array([0.1, 0.2, 0.6])
+COLOR_MAX = jnp.array([0.2, 0.5, 1.0])
 
 
 @jaxtyped(typechecker=beartype)
@@ -60,9 +65,10 @@ def normalize(vectors: Float[Array, "... 2"]) -> Float[Array, "... 2"]:
 class Flock:
     positions: Float[Array, "bird 2"]
     velocities: Float[Array, "bird 2"]
+    colors: Float[Array, "bird 3"]
 
 
-def initialize_flock(rng_key_1, rng_key_2) -> Flock:
+def initialize_flock(rng_key_1, rng_key_2, rng_key_3) -> Flock:
     ps = jax.random.uniform(
         rng_key_1,
         shape=(BIRD_COUNT, 2),
@@ -77,50 +83,51 @@ def initialize_flock(rng_key_1, rng_key_2) -> Flock:
     )
     vs = normalize(vs)
 
-    return Flock(positions=ps, velocities=vs)
+    colors = jax.random.uniform(
+        rng_key_3,
+        shape=(BIRD_COUNT, 3),
+        minval=COLOR_MIN,
+        maxval=COLOR_MAX,
+    )
+
+    return Flock(positions=ps, velocities=vs, colors=colors)
 
 
-def draw_height_field(surface: pygame.Surface, flock: Flock) -> None:
-    field = gaussian_height_field(flock.positions)
+def draw_flock_trails(
+    surface: pygame.Surface,
+    position_history: deque[np.ndarray],
+    colors: np.ndarray,
+) -> None:
+    if len(position_history) < 2:
+        return
 
-    # Normalize per-frame so the field is visible even when birds are sparse.
-    field = field - jnp.min(field)
-    field = field / jnp.maximum(jnp.max(field), EPS)
+    trail_layer = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+    segment_count = len(position_history) - 1
 
-    # Pygame surfarray wants width x height x channels, while our field is
-    # height x width. Blue hills keep red boids readable.
-    brightness = np.asarray(field * HEIGHT_FIELD_CONTRAST, dtype=np.uint8).T
-    pixels = np.zeros((WINDOW_WIDTH, WINDOW_HEIGHT, 3), dtype=np.uint8)
-    pixels[:, :, 2] = brightness
-    pixels[:, :, 1] = brightness // 3
+    for segment_index, (previous_positions, positions) in enumerate(
+        zip(position_history, list(position_history)[1:]), start=1
+    ):
+        freshness = segment_index / segment_count
+        alpha = int(MIN_TRAIL_ALPHA + (MAX_TRAIL_ALPHA - MIN_TRAIL_ALPHA) * freshness)
 
-    field_surface = pygame.surfarray.make_surface(pixels)
-    surface.blit(field_surface, (0, 0))
+        for previous_pos, bird_pos, bird_color in zip(
+            previous_positions, positions, colors
+        ):
+            # Skip wrapped steps so toroidal screen edges do not create long lines
+            # across the whole window.
+            if (
+                abs(float(bird_pos[0] - previous_pos[0])) > WINDOW_WIDTH / 2
+                or abs(float(bird_pos[1] - previous_pos[1])) > WINDOW_HEIGHT / 2
+            ):
+                continue
 
+            start = (int(previous_pos[0]), int(previous_pos[1]))
+            end = (int(bird_pos[0]), int(bird_pos[1]))
+            rgb = np.clip(bird_color * 255, 0, 255).astype(np.uint8)
+            color = tuple(int(channel) for channel in rgb) + (alpha,)
+            pygame.draw.line(trail_layer, color, start, end, TRAIL_WIDTH)
 
-def draw_flock(surface: pygame.Surface, flock: Flock) -> None:
-    def triangle_points(
-        position: pygame.Vector2, orientation: float, size: float
-    ) -> list[pygame.Vector2]:
-        local_points = [
-            pygame.Vector2(size * 0.70, 0.0),
-            pygame.Vector2(-size * 0.45, -size * 0.30),
-            pygame.Vector2(-size * 0.45, size * 0.30),
-        ]
-
-        return [position + point.rotate(orientation) for point in local_points]
-
-    for bird_pos, bird_velocity in zip(flock.positions, flock.velocities):
-        position = pygame.Vector2(float(bird_pos[0]), float(bird_pos[1]))
-        orientation = float(
-            jnp.degrees(jnp.arctan2(bird_velocity[1], bird_velocity[0]))
-        )
-
-        pygame.draw.polygon(
-            surface,
-            (255, 0, 0),
-            triangle_points(position, orientation, BIRD_BASE_SIZE),
-        )
+    surface.blit(trail_layer, (0, 0))
 
 
 @jaxtyped(typechecker=beartype)
@@ -287,21 +294,16 @@ def update_flock(dt: float, flock: Flock, time_seconds: float) -> Flock:
     positions = flock.positions + velocities * dt * BIRD_VELOCITY
     positions = jnp.mod(positions, jnp.array([WINDOW_WIDTH, WINDOW_HEIGHT]))
 
-    # separation: steer to avoid crowding local flockmates
-    # alignment: steer towards the average heading of local flockmates
-    # cohesion: steer to move towards the average position of local flockmates
-    return Flock(positions=positions, velocities=velocities)
+    return Flock(positions=positions, velocities=velocities, colors=flock.colors)
 
 
 def draw_fps(
     surface: pygame.Surface,
     font: pygame.Font,
     clock: pygame.time.Clock,
-    update_ms: float,
-    draw_ms: float,
 ) -> None:
     fps_text = font.render(
-        f"FPS: {clock.get_fps():.0f}  update: {update_ms:.2f}ms  draw: {draw_ms:.2f}ms",
+        f"FPS: {clock.get_fps():.0f}",
         True,
         WHITE,
     )
@@ -316,24 +318,22 @@ def main() -> None:
         pygame.display.set_caption("Flock Field")
         clock = pygame.time.Clock()
         font = pygame.font.Font(None, 24)
-        # birds = [random_bird() for _ in range(BIRD_COUNT)]
 
         rng_key = jax.random.key(10)
         rng_key, k1 = jax.random.split(rng_key)
         rng_key, k2 = jax.random.split(rng_key)
+        rng_key, k3 = jax.random.split(rng_key)
 
-        flock = initialize_flock(k1, k2)
+        flock = initialize_flock(k1, k2, k3)
+        flock.positions.block_until_ready()
+        position_history = deque(
+            [np.asarray(flock.positions)], maxlen=TRAIL_HISTORY_LENGTH + 1
+        )
+        colors = np.asarray(flock.colors)
 
-        print(flock.positions)
-        print()
-        print(flock.velocities)
+        screen.fill(BACKGROUND_COLOR)
 
         time_seconds = 0.0
-        update_ms = 0.0
-        draw_ms = 0.0
-        update_ms_samples: list[float] = []
-        draw_ms_samples: list[float] = []
-        last_timing_report = time.perf_counter()
 
         running = True
         while running:
@@ -346,36 +346,17 @@ def main() -> None:
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     running = False
 
-            update_start = time.perf_counter()
             flock = update_flock(dt, flock, time_seconds)
-            # JAX work can be asynchronous, so block here to measure actual
-            # simulation time instead of just dispatch time.
+            # JAX work can be asynchronous, so block here to wait for the
+            # simulation step to finish before drawing its result.
             flock.positions.block_until_ready()
-            update_ms = (time.perf_counter() - update_start) * 1000.0
+            position_history.append(np.asarray(flock.positions))
 
-            draw_start = time.perf_counter()
             screen.fill(BACKGROUND_COLOR)
-            # draw_height_field(screen, flock)
-            draw_flock(screen, flock)
-            draw_fps(screen, font, clock, update_ms, draw_ms)
+            draw_flock_trails(screen, position_history, colors)
+            draw_fps(screen, font, clock)
             pygame.display.flip()
-            draw_ms = (time.perf_counter() - draw_start) * 1000.0
 
-            update_ms_samples.append(update_ms)
-            draw_ms_samples.append(draw_ms)
-            now = time.perf_counter()
-            if now - last_timing_report >= TIMING_REPORT_INTERVAL:
-                avg_update_ms = sum(update_ms_samples) / len(update_ms_samples)
-                avg_draw_ms = sum(draw_ms_samples) / len(draw_ms_samples)
-                print(
-                    f"avg over {len(update_ms_samples)} frames: "
-                    f"update={avg_update_ms:.2f}ms, "
-                    f"draw={avg_draw_ms:.2f}ms, "
-                    f"fps={clock.get_fps():.0f}"
-                )
-                update_ms_samples.clear()
-                draw_ms_samples.clear()
-                last_timing_report = now
     finally:
         pygame.quit()
 

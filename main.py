@@ -13,16 +13,16 @@ from jaxtyping import Array, Float, jaxtyped
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 800
 
-BIRD_COUNT = 300
+BIRD_COUNT = 200
 TRAIL_WIDTH = 2
-TRAIL_HISTORY_LENGTH = 200
+TRAIL_HISTORY_LENGTH = 100
 MIN_TRAIL_ALPHA = 12
 MAX_TRAIL_ALPHA = 220
 BIRD_VELOCITY = 100.0
 FPS = 60
 
-# Separation field tuning. Each bird contributes a Gaussian "hill" to a
-# scalar height field. Birds steer down the gradient of that field.
+# Each bird contributes a Gaussian "hill" to a scalar height field.
+# Birds steer down the gradient of that field to avoid collisions.
 SEPARATION_SIGMA = 40.0
 SEPARATION_STRENGTH = 20
 
@@ -39,20 +39,26 @@ ALIGNMENT_SIDE_SIGMA = 35.0
 ALIGNMENT_STRENGTH = 2.0
 
 # Coherent wandering force. This is a smooth spatial vector field that slowly
-# scrolls over time, rather than independent jitter per bird.
+# scrolls over time.
 NOISE_SCALE = 160.0
 NOISE_SCROLL_SPEED = 0.35
 NOISE_STRENGTH = 1.5
 
-MAX_TURN_FORCE = 8.0
+# Soft circular boundary. Birds can cross it, but the field increasingly steers
+# them back toward the central circle
+BOUNDARY_RADIUS = 330.0
+BOUNDARY_SOFTNESS = 50.0
+BOUNDARY_STRENGTH = 12.0
+
+MAX_TURN_FORCE = 4.0
 EPS = 1e-8
 
-BACKGROUND_COLOR = pygame.Color(48, 48, 48)
+BACKGROUND_COLOR = pygame.Color(60, 48, 48)
 WHITE = pygame.Color(255, 255, 255)
 
 # RGB color min and max to sample from (0-1.0)
-COLOR_MIN = jnp.array([0.1, 0.2, 0.6])
-COLOR_MAX = jnp.array([0.2, 0.5, 1.0])
+COLOR_MIN = jnp.array([0.6, 0.2, 0.2])
+COLOR_MAX = jnp.array([1.0, 0.5, 0.5])
 
 
 @jaxtyped(typechecker=beartype)
@@ -113,14 +119,6 @@ def draw_flock_trails(
         for previous_pos, bird_pos, bird_color in zip(
             previous_positions, positions, colors
         ):
-            # Skip wrapped steps so toroidal screen edges do not create long lines
-            # across the whole window.
-            if (
-                abs(float(bird_pos[0] - previous_pos[0])) > WINDOW_WIDTH / 2
-                or abs(float(bird_pos[1] - previous_pos[1])) > WINDOW_HEIGHT / 2
-            ):
-                continue
-
             start = (int(previous_pos[0]), int(previous_pos[1]))
             end = (int(bird_pos[0]), int(bird_pos[1]))
             rgb = np.clip(bird_color * 255, 0, 255).astype(np.uint8)
@@ -155,14 +153,11 @@ def gaussian_height_field(
 def pairwise_offsets(
     positions: Float[Array, "bird 2"],
 ) -> Float[Array, "bird bird 2"]:
-    """Shortest wrapped offset from each neighbor to each sample bird.
+    """Offset from each neighbor to each sample bird.
 
-    result[i, j] is positions[i] - positions[j], adjusted for the toroidal
-    screen wrap used in update_flock.
+    result[i, j] is positions[i] - positions[j].
     """
-    offset = positions[:, None, :] - positions[None, :, :]
-    world_size = jnp.array([WINDOW_WIDTH, WINDOW_HEIGHT], dtype=positions.dtype)
-    return offset - world_size * jnp.round(offset / world_size)
+    return positions[:, None, :] - positions[None, :, :]
 
 
 @jaxtyped(typechecker=beartype)
@@ -203,8 +198,6 @@ def cohesion_field(
     offset = pairwise_offsets(positions)
     distance = jnp.linalg.norm(offset, axis=-1, keepdims=True)
 
-    # Peak attraction around COHESION_DISTANCE. Multiplying by a smooth
-    # near-distance gate keeps cohesion from fighting separation up close.
     ring_weight = jnp.exp(
         -((distance - COHESION_DISTANCE) ** 2) / (2.0 * COHESION_SIGMA**2)
     )
@@ -271,6 +264,21 @@ def noise_field(
 
 
 @jaxtyped(typechecker=beartype)
+def boundary_field(
+    positions: Float[Array, "bird 2"],
+) -> Float[Array, "bird 2"]:
+    """Steer birds back into a soft circular arena centered in the window."""
+    center = jnp.array([WINDOW_WIDTH / 2.0, WINDOW_HEIGHT / 2.0], dtype=positions.dtype)
+    offset_from_center = positions - center
+    distance = jnp.linalg.norm(offset_from_center, axis=-1, keepdims=True)
+    outward = offset_from_center / jnp.maximum(distance, EPS)
+
+    outside = jnp.maximum(distance - BOUNDARY_RADIUS, 0.0)
+    strength = outside / BOUNDARY_SOFTNESS
+    return -outward * strength
+
+
+@jaxtyped(typechecker=beartype)
 def limit_magnitude(
     vectors: Float[Array, "... 2"], max_magnitude: float
 ) -> Float[Array, "... 2"]:
@@ -284,15 +292,15 @@ def update_flock(dt: float, flock: Flock, time_seconds: float) -> Flock:
     cohesion = cohesion_field(flock.positions) * COHESION_STRENGTH
     alignment = alignment_field(flock.positions, flock.velocities) * ALIGNMENT_STRENGTH
     noise = noise_field(flock.positions, time_seconds) * NOISE_STRENGTH
+    boundary = boundary_field(flock.positions) * BOUNDARY_STRENGTH
 
-    turn_force = separation + cohesion + alignment + noise
+    turn_force = separation + cohesion + alignment + noise + boundary
     turn_force = limit_magnitude(turn_force, MAX_TURN_FORCE)
 
     steering = flock.velocities + turn_force * dt
     velocities = normalize(steering)
 
     positions = flock.positions + velocities * dt * BIRD_VELOCITY
-    positions = jnp.mod(positions, jnp.array([WINDOW_WIDTH, WINDOW_HEIGHT]))
 
     return Flock(positions=positions, velocities=velocities, colors=flock.colors)
 
@@ -347,8 +355,6 @@ def main() -> None:
                     running = False
 
             flock = update_flock(dt, flock, time_seconds)
-            # JAX work can be asynchronous, so block here to wait for the
-            # simulation step to finish before drawing its result.
             flock.positions.block_until_ready()
             position_history.append(np.asarray(flock.positions))
 

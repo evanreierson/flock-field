@@ -34,7 +34,7 @@ COHESION_STRENGTH = 2.0
 
 # Alignment is a vector field. Each bird contributes its heading through an
 # oriented Gaussian: longer in front/behind the bird, narrower sideways.
-ALIGNMENT_LONG_SIGMA = 90.0
+ALIGNMENT_LONG_SIGMA = 80.0
 ALIGNMENT_SIDE_SIGMA = 35.0
 ALIGNMENT_STRENGTH = 2.0
 
@@ -42,13 +42,13 @@ ALIGNMENT_STRENGTH = 2.0
 # scrolls over time.
 NOISE_SCALE = 160.0
 NOISE_SCROLL_SPEED = 0.35
-NOISE_STRENGTH = 1.5
+NOISE_STRENGTH = 1.8
 
 # Soft circular boundary. Birds can cross it, but the field increasingly steers
 # them back toward the central circle
-BOUNDARY_RADIUS = 330.0
+BOUNDARY_RADIUS = 300.0
 BOUNDARY_SOFTNESS = 50.0
-BOUNDARY_STRENGTH = 12.0
+BOUNDARY_STRENGTH = 15.0
 
 MAX_TURN_FORCE = 4.0
 EPS = 1e-8

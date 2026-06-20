@@ -74,15 +74,17 @@ class Flock:
     colors: Float[Array, "bird 3"]
 
 
-def initialize_flock(rng_key_1, rng_key_2, rng_key_3) -> Flock:
+def initialize_flock(rng_key) -> Flock:
+    position_key, velocity_key, color_key = jax.random.split(rng_key, 3)
+
     ps = jax.random.uniform(
-        rng_key_1,
+        position_key,
         shape=(BIRD_COUNT, 2),
         minval=jnp.array([0, 0]),
         maxval=jnp.array([WINDOW_WIDTH, WINDOW_HEIGHT]),
     )
     vs = jax.random.uniform(
-        rng_key_2,
+        velocity_key,
         shape=(BIRD_COUNT, 2),
         minval=jnp.array([-1, -1]),
         maxval=jnp.array([1, 1]),
@@ -90,7 +92,7 @@ def initialize_flock(rng_key_1, rng_key_2, rng_key_3) -> Flock:
     vs = normalize(vs)
 
     colors = jax.random.uniform(
-        rng_key_3,
+        color_key,
         shape=(BIRD_COUNT, 3),
         minval=COLOR_MIN,
         maxval=COLOR_MAX,
@@ -328,11 +330,8 @@ def main() -> None:
         font = pygame.font.Font(None, 24)
 
         rng_key = jax.random.key(10)
-        rng_key, k1 = jax.random.split(rng_key)
-        rng_key, k2 = jax.random.split(rng_key)
-        rng_key, k3 = jax.random.split(rng_key)
 
-        flock = initialize_flock(k1, k2, k3)
+        flock = initialize_flock(rng_key)
         flock.positions.block_until_ready()
         position_history = deque(
             [np.asarray(flock.positions)], maxlen=TRAIL_HISTORY_LENGTH + 1

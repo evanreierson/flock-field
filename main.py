@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import argparse
 from collections import deque
+from pathlib import Path
 
 import chex
 import jax
 import jax.numpy as jnp
+import imageio.v2 as imageio
 import numpy as np
 import pygame
 from beartype import beartype
@@ -247,7 +250,7 @@ def alignment_field(
 
 @jaxtyped(typechecker=beartype)
 def noise_field(
-    positions: Float[Array, "bird 2"], time_seconds: float
+    positions: Float[Array, "bird 2"], time_seconds
 ) -> Float[Array, "bird 2"]:
     """Smooth pseudo-noise vector field for less perfectly settled flocks."""
     p = positions / NOISE_SCALE
@@ -289,6 +292,7 @@ def limit_magnitude(
     return vectors * scale
 
 
+@jax.jit
 def update_flock(dt: float, flock: Flock, time_seconds: float) -> Flock:
     separation = separation_field(flock.positions) * SEPARATION_STRENGTH
     cohesion = cohesion_field(flock.positions) * COHESION_STRENGTH
@@ -307,6 +311,12 @@ def update_flock(dt: float, flock: Flock, time_seconds: float) -> Flock:
     return Flock(positions=positions, velocities=velocities, colors=flock.colors)
 
 
+def warm_up_update_flock(flock: Flock) -> None:
+    """Compile the jitted update once so the first rendered frame is not slow."""
+    warmed_flock = update_flock(0.0, flock, 0.0)
+    warmed_flock.positions.block_until_ready()
+
+
 def draw_fps(
     surface: pygame.Surface,
     font: pygame.Font,
@@ -318,6 +328,68 @@ def draw_fps(
         WHITE,
     )
     surface.blit(fps_text, (10, 10))
+
+
+def render_mp4(
+    output_path: str | Path = "dist/flock.mp4",
+    duration_seconds: float = 10.0,
+    fps: int = FPS,
+) -> None:
+    """Render the simulation offline to an MP4 at a fixed frame rate."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pygame.init()
+
+    try:
+        surface = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
+
+        rng_key = jax.random.key(10)
+        flock = initialize_flock(rng_key)
+        flock.positions.block_until_ready()
+
+        position_history = deque(
+            [np.asarray(flock.positions)], maxlen=TRAIL_HISTORY_LENGTH + 1
+        )
+        colors = np.asarray(flock.colors)
+        warm_up_update_flock(flock)
+
+        dt = 1.0 / fps
+        total_frames = int(duration_seconds * fps)
+        time_seconds = 0.0
+
+        with imageio.get_writer(
+            output_path,
+            fps=fps,
+            codec="libx264",
+            quality=8,
+            macro_block_size=1,
+        ) as writer:
+            for frame_index in range(total_frames):
+                time_seconds += dt
+
+                flock = update_flock(dt, flock, time_seconds)
+                flock.positions.block_until_ready()
+                position_history.append(np.asarray(flock.positions))
+
+                surface.fill(BACKGROUND_COLOR)
+                draw_flock_trails(surface, position_history, colors)
+
+                # Pygame returns width x height x channel; video wants height x width x channel.
+                frame = pygame.surfarray.array3d(surface)
+                frame = np.transpose(frame, (1, 0, 2))
+                writer.append_data(frame)
+
+                if (frame_index + 1) % fps == 0:
+                    print(
+                        f"Rendered {(frame_index + 1) / fps:.0f}s / "
+                        f"{duration_seconds:.0f}s"
+                    )
+
+        print(f"Wrote {output_path}")
+
+    finally:
+        pygame.quit()
 
 
 def main() -> None:
@@ -337,6 +409,7 @@ def main() -> None:
             [np.asarray(flock.positions)], maxlen=TRAIL_HISTORY_LENGTH + 1
         )
         colors = np.asarray(flock.colors)
+        warm_up_update_flock(flock)
 
         screen.fill(BACKGROUND_COLOR)
 
@@ -366,5 +439,31 @@ def main() -> None:
         pygame.quit()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Flock Field")
+    parser.add_argument(
+        "--render-mp4",
+        metavar="PATH",
+        help="Render offline to an MP4 instead of opening the pygame window.",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help="MP4 duration in seconds. Default: 10.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=FPS,
+        help=f"MP4 frames per second. Default: {FPS}.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.render_mp4:
+        render_mp4(args.render_mp4, duration_seconds=args.duration, fps=args.fps)
+    else:
+        main()

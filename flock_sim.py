@@ -45,19 +45,13 @@ def initialize_flock(
 
 
 @jit
+def separation_field(sample_point, positions, sigma=1.0):
+    diffs = sample_point - positions
+    sq_dists = jnp.sum(diffs**2, axis=-1)
+    hills = jnp.exp(-sq_dists / (2 * sigma**2))
+    return jnp.sum(hills)
+
+
 def make_separation_field(positions, sigma=1.0):
-    def field(sample_point):
-        diffs = sample_point - positions
-        sq_dists = jnp.sum(diffs**2, axis=-1)
-        hills = jnp.exp(-sq_dists / (2 * sigma**2))
-        return jnp.sum(hills)
-
-    return field
-
-
-rng_key = jax.random.key(10)
-rng_key, k = jax.random.split(rng_key)
-
-flock = initialize_flock(k, 10)
-
-field = make_separation_field(flock.positions, sigma=0.1)
+    """Compose a convenient field function around the jitted evaluator."""
+    return lambda sample_point: separation_field(sample_point, positions, sigma)

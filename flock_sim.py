@@ -181,23 +181,11 @@ def sample_field_bilinear(
 
 
 @jaxtyped(typechecker=beartype)
-def clamp_vector_lengths(
-    vectors: Float[Array, "... 2"],
-    min_length: float,
-    max_length: float,
-) -> Float[Array, "... 2"]:
-    lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)
-    clamped_lengths = jnp.clip(lengths, min_length, max_length)
-    return normalize(vectors) * clamped_lengths
-
-
-@jaxtyped(typechecker=beartype)
 def update_flock(
     flock: Flock,
     simulation_grid_size: int,
     dt: float,
-    min_velocity: float,
-    max_velocity: float,
+    speed: float,
     separation_strength: float,
     turn_rate: float,
     sigma: float,
@@ -205,7 +193,6 @@ def update_flock(
     boundary_strength: float = 8.0,
     separation_kernel_radius: int | None = None,
 ) -> Flock:
-    velocity = clamp_vector_lengths(flock.headings, min_velocity, max_velocity)
     field = boundary_field(
         simulation_grid_size=simulation_grid_size,
         margin=boundary_margin,
@@ -219,7 +206,6 @@ def update_flock(
         kernel_radius=separation_kernel_radius,
     )
     influence = sample_field_bilinear(field, flock.positions)
-    headings = normalize(velocity + turn_rate * influence)
-    speed = jnp.linalg.norm(velocity, axis=-1, keepdims=True)
+    headings = normalize(flock.headings + turn_rate * influence)
     positions = jnp.clip(flock.positions + headings * speed * dt, -1, 1)
     return Flock(positions=positions, headings=headings)

@@ -117,6 +117,27 @@ def separation_field(
 
 
 @jaxtyped(typechecker=beartype)
+def boundary_field(
+    simulation_grid_size: int,
+    margin: float,
+    strength: float,
+) -> Float[Array, "height width 2"]:
+    grid = grid_coordinates(simulation_grid_size)
+    x = grid[:, :, 0]
+    y = grid[:, :, 1]
+    margin = jnp.maximum(margin, EPS)
+
+    left = jnp.clip((margin - (x + 1)) / margin, 0, 1)
+    right = jnp.clip((margin - (1 - x)) / margin, 0, 1)
+    bottom = jnp.clip((margin - (y + 1)) / margin, 0, 1)
+    top = jnp.clip((margin - (1 - y)) / margin, 0, 1)
+
+    inward_x = left * left - right * right
+    inward_y = bottom * bottom - top * top
+    return strength * jnp.stack([inward_x, inward_y], axis=-1)
+
+
+@jaxtyped(typechecker=beartype)
 def separation_density(
     flock: Flock,
     simulation_grid_size: int,
@@ -156,7 +177,7 @@ def clamp_vector_lengths(
 
 
 @jaxtyped(typechecker=beartype)
-def update_flock_with_separation_field(
+def update_flock(
     flock: Flock,
     simulation_grid_size: int,
     dt: float,
@@ -165,16 +186,23 @@ def update_flock_with_separation_field(
     separation_strength: float,
     turn_rate: float,
     sigma: float,
+    boundary_margin: float = 0.2,
+    boundary_strength: float = 8.0,
 ) -> Flock:
     velocity = clamp_vector_lengths(flock.headings, min_velocity, max_velocity)
-    field = separation_field(
+    field = boundary_field(
+        simulation_grid_size=simulation_grid_size,
+        margin=boundary_margin,
+        strength=boundary_strength,
+    )
+    field = field + separation_field(
         flock=flock,
         simulation_grid_size=simulation_grid_size,
         sigma=sigma,
         strength=separation_strength,
     )
-    separation = sample_field_bilinear(field, flock.positions)
-    headings = normalize(velocity + turn_rate * separation)
+    influence = sample_field_bilinear(field, flock.positions)
+    headings = normalize(velocity + turn_rate * influence)
     speed = jnp.linalg.norm(velocity, axis=-1, keepdims=True)
     positions = jnp.clip(flock.positions + headings * speed * dt, -1, 1)
     return Flock(positions=positions, headings=headings)

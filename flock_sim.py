@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 
 import chex
@@ -76,25 +77,48 @@ def grid_coordinates(
 
 
 @jaxtyped(typechecker=beartype)
-def splat_field(
+def local_splat_field(
     positions: Float[Array, "bird 2"],
     simulation_grid_size: int,
+    kernel_radius: int,
     kernel: Callable[
-        [Float[Array, "bird height width 2"]],
-        Float[Array, "bird height width 2"],
+        [Float[Array, "bird cell 2"]],
+        Float[Array, "bird cell 2"],
     ],
 ) -> Float[Array, "height width 2"]:
-    grid = grid_coordinates(simulation_grid_size)
-    offset = grid[None, :, :, :] - positions[:, None, None, :]
-    return jnp.sum(kernel(offset), axis=0)
+    grid_positions = simulation_to_grid(positions, simulation_grid_size)
+    centers = jnp.rint(grid_positions).astype(jnp.int32)
+
+    axis = jnp.arange(-kernel_radius, kernel_radius + 1, dtype=jnp.int32)
+    offset_x, offset_y = jnp.meshgrid(axis, axis, indexing="xy")
+    index_offsets = jnp.stack([offset_x.ravel(), offset_y.ravel()], axis=-1)
+
+    cell_indices = centers[:, None, :] + index_offsets[None, :, :]
+    in_bounds = jnp.all(
+        (0 <= cell_indices) & (cell_indices < simulation_grid_size),
+        axis=-1,
+    )
+
+    scale = (simulation_grid_size - 1) / 2
+    cell_positions = cell_indices.astype(positions.dtype) / scale - 1
+    simulation_offsets = cell_positions - positions[:, None, :]
+    values = kernel(simulation_offsets)
+    values = jnp.where(in_bounds[:, :, None], values, jnp.zeros_like(values))
+
+    safe_indices = jnp.clip(cell_indices, 0, simulation_grid_size - 1)
+    field = jnp.zeros(
+        (simulation_grid_size, simulation_grid_size, 2),
+        dtype=positions.dtype,
+    )
+    return field.at[safe_indices[:, :, 1], safe_indices[:, :, 0]].add(values)
 
 
 @jaxtyped(typechecker=beartype)
 def separation_kernel(
-    offset: Float[Array, "bird height width 2"],
+    offset: Float[Array, "... 2"],
     sigma: float,
     strength: float,
-) -> Float[Array, "bird height width 2"]:
+) -> Float[Array, "... 2"]:
     distance_squared = jnp.sum(offset * offset, axis=-1, keepdims=True)
     distance = jnp.sqrt(distance_squared + EPS)
     sigma_squared = jnp.maximum(sigma * sigma, EPS)
@@ -108,10 +132,16 @@ def separation_field(
     simulation_grid_size: int,
     sigma: float,
     strength: float,
+    kernel_radius: int | None = None,
 ) -> Float[Array, "height width 2"]:
-    return splat_field(
+    if kernel_radius is None:
+        sigma_cells = sigma * (simulation_grid_size - 1) / 2
+        kernel_radius = max(1, math.ceil(3 * sigma_cells))
+
+    return local_splat_field(
         flock.positions,
         simulation_grid_size,
+        kernel_radius,
         lambda offset: separation_kernel(offset, sigma, strength),
     )
 
@@ -173,6 +203,7 @@ def update_flock(
     sigma: float,
     boundary_margin: float = 0.2,
     boundary_strength: float = 8.0,
+    separation_kernel_radius: int | None = None,
 ) -> Flock:
     velocity = clamp_vector_lengths(flock.headings, min_velocity, max_velocity)
     field = boundary_field(
@@ -185,6 +216,7 @@ def update_flock(
         simulation_grid_size=simulation_grid_size,
         sigma=sigma,
         strength=separation_strength,
+        kernel_radius=separation_kernel_radius,
     )
     influence = sample_field_bilinear(field, flock.positions)
     headings = normalize(velocity + turn_rate * influence)

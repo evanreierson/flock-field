@@ -16,3 +16,9 @@ dependencies = [
 
 [tool.ruff]
 lint.ignore = ["F722"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "jupyterlab>=4.6.1",
+]

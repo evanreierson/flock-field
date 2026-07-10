@@ -7,11 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "beartype>=0.22.9",
     "chex>=0.1.92",
+    "ipycanvas>=0.14.3",
     "jax>=0.10.2",
     "jaxtyping>=0.3.11",
-    "pygame-ce>=2.5.7",
-    "imageio>=2.37.0",
-    "imageio-ffmpeg>=0.6.0",
 ]
 
 [tool.ruff]

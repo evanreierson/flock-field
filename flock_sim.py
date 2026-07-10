@@ -2,7 +2,6 @@ import chex
 import jax
 import jax.numpy as jnp
 from beartype import beartype
-from jax import jit
 from jaxtyping import Array, Float, jaxtyped
 
 EPS = 1e-8
@@ -42,16 +41,3 @@ def initialize_flock(
     )
 
     return Flock(positions=positions, headings=headings)
-
-
-@jit
-def separation_field(sample_point, positions, sigma=1.0):
-    diffs = sample_point - positions
-    sq_dists = jnp.sum(diffs**2, axis=-1)
-    hills = jnp.exp(-sq_dists / (2 * sigma**2))
-    return jnp.sum(hills)
-
-
-def make_separation_field(positions, sigma=1.0):
-    """Compose a convenient field function around the jitted evaluator."""
-    return lambda sample_point: separation_field(sample_point, positions, sigma)

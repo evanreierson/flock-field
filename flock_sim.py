@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from beartype import beartype
 from jax.scipy.ndimage import map_coordinates
-from jaxtyping import Array, Float, jaxtyped
+from jaxtyping import Array, Float, Int, jaxtyped
 
 EPS = 1e-8
 
@@ -21,6 +21,7 @@ def normalize(vectors: Float[Array, "... 2"]) -> Float[Array, "... 2"]:
 class Flock:
     positions: Float[Array, "bird 2"]
     headings: Float[Array, "bird 2"]
+    generation: Int[Array, ""]
 
 
 def initialize_flock(
@@ -44,7 +45,11 @@ def initialize_flock(
         )
     )
 
-    return Flock(positions=positions, headings=headings)
+    return Flock(
+        positions=positions,
+        headings=headings,
+        generation=jnp.array(0, dtype=jnp.int32),
+    )
 
 
 @jaxtyped(typechecker=beartype)
@@ -234,6 +239,38 @@ def boundary_field(
 
 
 @jaxtyped(typechecker=beartype)
+def noise_field(
+    generation: Int[Array, ""],
+    simulation_grid_size: int,
+    strength: float,
+    noise_grid_size: int = 4,
+    temporal_rate: float = 0.025,
+) -> Float[Array, "height width 2"]:
+    grid = grid_coordinates(simulation_grid_size)
+    x = grid[:, :, 0]
+    y = grid[:, :, 1]
+
+    time = generation.astype(x.dtype) * temporal_rate
+    frequency = jnp.pi * jnp.maximum(
+        jnp.asarray(noise_grid_size, dtype=x.dtype),
+        1.0,
+    )
+
+    waves = jnp.stack(
+        [
+            jnp.sin(frequency * (x + 0.35 * y) + 0.7 * time)
+            + 0.5 * jnp.sin(1.7 * frequency * (-0.2 * x + y) + 1.3 * time),
+            jnp.cos(frequency * (y - 0.25 * x) + 1.1 * time)
+            + 0.5 * jnp.cos(1.5 * frequency * (x + 0.15 * y) + 0.9 * time),
+        ],
+        axis=-1,
+    )
+    magnitude = jnp.linalg.norm(waves, axis=-1, keepdims=True)
+    mean_magnitude = jnp.maximum(jnp.mean(magnitude), EPS)
+    return strength * waves / mean_magnitude
+
+
+@jaxtyped(typechecker=beartype)
 def sample_field_bilinear(
     field: Float[Array, "height width 2"],
     positions: Float[Array, "bird 2"],
@@ -261,15 +298,27 @@ def update_flock(
     alignment_sigma: float = 0.16,
     boundary_margin: float = 0.2,
     boundary_strength: float = 8.0,
+    noise_strength: float = 0.0,
+    noise_grid_size: int = 4,
+    noise_temporal_rate: float = 0.025,
     separation_kernel_radius: int | None = None,
     cohesion_kernel_radius: int | None = None,
     alignment_kernel_radius: int | None = None,
 ) -> Flock:
+    next_generation = flock.generation + jnp.array(1, dtype=flock.generation.dtype)
     field = boundary_field(
         simulation_grid_size=simulation_grid_size,
         margin=boundary_margin,
         strength=boundary_strength,
     )
+    if noise_strength != 0.0:
+        field = field + noise_field(
+            generation=flock.generation,
+            simulation_grid_size=simulation_grid_size,
+            strength=noise_strength,
+            noise_grid_size=noise_grid_size,
+            temporal_rate=noise_temporal_rate,
+        )
     field = field + separation_field(
         flock=flock,
         simulation_grid_size=simulation_grid_size,
@@ -294,7 +343,7 @@ def update_flock(
     influence = sample_field_bilinear(field, flock.positions)
     headings = normalize(flock.headings + turn_rate * influence)
     positions = jnp.clip(flock.positions + headings * speed * dt, -1, 1)
-    return Flock(positions=positions, headings=headings)
+    return Flock(positions=positions, headings=headings, generation=next_generation)
 
 
 @beartype
@@ -311,6 +360,9 @@ def make_update_step(
     alignment_sigma: float = 0.16,
     boundary_margin: float = 0.2,
     boundary_strength: float = 8.0,
+    noise_strength: float = 0.0,
+    noise_grid_size: int = 4,
+    noise_temporal_rate: float = 0.025,
     separation_kernel_radius: int | None = None,
     cohesion_kernel_radius: int | None = None,
     alignment_kernel_radius: int | None = None,
@@ -331,6 +383,9 @@ def make_update_step(
             alignment_sigma=alignment_sigma,
             boundary_margin=boundary_margin,
             boundary_strength=boundary_strength,
+            noise_strength=noise_strength,
+            noise_grid_size=noise_grid_size,
+            noise_temporal_rate=noise_temporal_rate,
             separation_kernel_radius=separation_kernel_radius,
             cohesion_kernel_radius=cohesion_kernel_radius,
             alignment_kernel_radius=alignment_kernel_radius,

@@ -147,6 +147,39 @@ def separation_field(
 
 
 @jaxtyped(typechecker=beartype)
+def cohesion_kernel(
+    offset: Float[Array, "... 2"],
+    sigma: float,
+    strength: float,
+) -> Float[Array, "... 2"]:
+    distance_squared = jnp.sum(offset * offset, axis=-1, keepdims=True)
+    distance = jnp.sqrt(distance_squared + EPS)
+    sigma_squared = jnp.maximum(sigma * sigma, EPS)
+    gaussian = jnp.exp(-distance_squared / (2 * sigma_squared))
+    return -strength * gaussian * offset / distance
+
+
+@jaxtyped(typechecker=beartype)
+def cohesion_field(
+    flock: Flock,
+    simulation_grid_size: int,
+    sigma: float,
+    strength: float,
+    kernel_radius: int | None = None,
+) -> Float[Array, "height width 2"]:
+    if kernel_radius is None:
+        sigma_cells = sigma * (simulation_grid_size - 1) / 2
+        kernel_radius = max(1, math.ceil(3 * sigma_cells))
+
+    return local_splat_field(
+        flock.positions,
+        simulation_grid_size,
+        kernel_radius,
+        lambda offset: cohesion_kernel(offset, sigma, strength),
+    )
+
+
+@jaxtyped(typechecker=beartype)
 def boundary_field(
     simulation_grid_size: int,
     margin: float,
@@ -189,9 +222,12 @@ def update_flock(
     separation_strength: float,
     turn_rate: float,
     sigma: float,
+    cohesion_strength: float = 0.25,
+    cohesion_sigma: float = 0.2,
     boundary_margin: float = 0.2,
     boundary_strength: float = 8.0,
     separation_kernel_radius: int | None = None,
+    cohesion_kernel_radius: int | None = None,
 ) -> Flock:
     field = boundary_field(
         simulation_grid_size=simulation_grid_size,
@@ -204,6 +240,13 @@ def update_flock(
         sigma=sigma,
         strength=separation_strength,
         kernel_radius=separation_kernel_radius,
+    )
+    field = field + cohesion_field(
+        flock=flock,
+        simulation_grid_size=simulation_grid_size,
+        sigma=cohesion_sigma,
+        strength=cohesion_strength,
+        kernel_radius=cohesion_kernel_radius,
     )
     influence = sample_field_bilinear(field, flock.positions)
     headings = normalize(flock.headings + turn_rate * influence)
@@ -219,9 +262,12 @@ def make_update_step(
     separation_strength: float,
     turn_rate: float,
     sigma: float,
+    cohesion_strength: float = 0.25,
+    cohesion_sigma: float = 0.2,
     boundary_margin: float = 0.2,
     boundary_strength: float = 8.0,
     separation_kernel_radius: int | None = None,
+    cohesion_kernel_radius: int | None = None,
 ) -> Callable[[Flock], Flock]:
     """Return a jitted flock update with static simulation configuration."""
     return jax.jit(
@@ -233,8 +279,11 @@ def make_update_step(
             separation_strength=separation_strength,
             turn_rate=turn_rate,
             sigma=sigma,
+            cohesion_strength=cohesion_strength,
+            cohesion_sigma=cohesion_sigma,
             boundary_margin=boundary_margin,
             boundary_strength=boundary_strength,
             separation_kernel_radius=separation_kernel_radius,
+            cohesion_kernel_radius=cohesion_kernel_radius,
         )
     )

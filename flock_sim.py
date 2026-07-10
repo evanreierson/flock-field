@@ -209,3 +209,32 @@ def update_flock(
     headings = normalize(flock.headings + turn_rate * influence)
     positions = jnp.clip(flock.positions + headings * speed * dt, -1, 1)
     return Flock(positions=positions, headings=headings)
+
+
+@beartype
+def make_update_step(
+    simulation_grid_size: int,
+    dt: float,
+    speed: float,
+    separation_strength: float,
+    turn_rate: float,
+    sigma: float,
+    boundary_margin: float = 0.2,
+    boundary_strength: float = 8.0,
+    separation_kernel_radius: int | None = None,
+) -> Callable[[Flock], Flock]:
+    """Return a jitted flock update with static simulation configuration."""
+    return jax.jit(
+        lambda flock: update_flock(
+            flock=flock,
+            simulation_grid_size=simulation_grid_size,
+            dt=dt,
+            speed=speed,
+            separation_strength=separation_strength,
+            turn_rate=turn_rate,
+            sigma=sigma,
+            boundary_margin=boundary_margin,
+            boundary_strength=boundary_strength,
+            separation_kernel_radius=separation_kernel_radius,
+        )
+    )

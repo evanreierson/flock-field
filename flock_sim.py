@@ -91,6 +91,21 @@ def separation_field(
 
 
 @jaxtyped(typechecker=beartype)
+def separation_density(
+    flock: Flock,
+    simulation_grid_size: int,
+    sigma: float,
+    strength: float,
+) -> Float[Array, "height width"]:
+    grid = grid_coordinates(simulation_grid_size)
+    offset = grid[None, :, :, :] - flock.positions[:, None, None, :]
+    distance_squared = jnp.sum(offset * offset, axis=-1)
+    sigma_squared = jnp.maximum(sigma * sigma, EPS)
+    gaussian = jnp.exp(-distance_squared / (2 * sigma_squared))
+    return jnp.sum(strength * gaussian, axis=0)
+
+
+@jaxtyped(typechecker=beartype)
 def sample_field_bilinear(
     field: Float[Array, "height width 2"],
     positions: Float[Array, "bird 2"],

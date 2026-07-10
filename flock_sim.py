@@ -3,8 +3,8 @@ from collections.abc import Callable
 import chex
 import jax
 import jax.numpy as jnp
-from jax.scipy.ndimage import map_coordinates
 from beartype import beartype
+from jax.scipy.ndimage import map_coordinates
 from jaxtyping import Array, Float, jaxtyped
 
 EPS = 1e-8
@@ -135,21 +135,6 @@ def boundary_field(
     inward_x = left * left - right * right
     inward_y = bottom * bottom - top * top
     return strength * jnp.stack([inward_x, inward_y], axis=-1)
-
-
-@jaxtyped(typechecker=beartype)
-def separation_density(
-    flock: Flock,
-    simulation_grid_size: int,
-    sigma: float,
-    strength: float,
-) -> Float[Array, "height width"]:
-    grid = grid_coordinates(simulation_grid_size)
-    offset = grid[None, :, :, :] - flock.positions[:, None, None, :]
-    distance_squared = jnp.sum(offset * offset, axis=-1)
-    sigma_squared = jnp.maximum(sigma * sigma, EPS)
-    gaussian = jnp.exp(-distance_squared / (2 * sigma_squared))
-    return jnp.sum(strength * gaussian, axis=0)
 
 
 @jaxtyped(typechecker=beartype)

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import chex
 import jax
 import jax.numpy as jnp
@@ -74,20 +76,44 @@ def grid_coordinates(
 
 
 @jaxtyped(typechecker=beartype)
+def splat_field(
+    positions: Float[Array, "bird 2"],
+    simulation_grid_size: int,
+    kernel: Callable[
+        [Float[Array, "bird height width 2"]],
+        Float[Array, "bird height width 2"],
+    ],
+) -> Float[Array, "height width 2"]:
+    grid = grid_coordinates(simulation_grid_size)
+    offset = grid[None, :, :, :] - positions[:, None, None, :]
+    return jnp.sum(kernel(offset), axis=0)
+
+
+@jaxtyped(typechecker=beartype)
+def separation_kernel(
+    offset: Float[Array, "bird height width 2"],
+    sigma: float,
+    strength: float,
+) -> Float[Array, "bird height width 2"]:
+    distance_squared = jnp.sum(offset * offset, axis=-1, keepdims=True)
+    distance = jnp.sqrt(distance_squared + EPS)
+    sigma_squared = jnp.maximum(sigma * sigma, EPS)
+    gaussian = jnp.exp(-distance_squared / (2 * sigma_squared))
+    return strength * gaussian * offset / distance
+
+
+@jaxtyped(typechecker=beartype)
 def separation_field(
     flock: Flock,
     simulation_grid_size: int,
     sigma: float,
     strength: float,
 ) -> Float[Array, "height width 2"]:
-    grid = grid_coordinates(simulation_grid_size)
-    offset = grid[None, :, :, :] - flock.positions[:, None, None, :]
-    distance_squared = jnp.sum(offset * offset, axis=-1, keepdims=True)
-    distance = jnp.sqrt(distance_squared + EPS)
-    sigma_squared = jnp.maximum(sigma * sigma, EPS)
-    gaussian = jnp.exp(-distance_squared / (2 * sigma_squared))
-    influence = strength * gaussian * offset / distance
-    return jnp.sum(influence, axis=0)
+    return splat_field(
+        flock.positions,
+        simulation_grid_size,
+        lambda offset: separation_kernel(offset, sigma, strength),
+    )
 
 
 @jaxtyped(typechecker=beartype)

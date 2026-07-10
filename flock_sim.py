@@ -224,18 +224,14 @@ def boundary_field(
     strength: float,
 ) -> Float[Array, "height width 2"]:
     grid = grid_coordinates(simulation_grid_size)
-    x = grid[:, :, 0]
-    y = grid[:, :, 1]
+    radius = jnp.linalg.norm(grid, axis=-1, keepdims=True)
     margin = jnp.maximum(margin, EPS)
 
-    left = jnp.clip((margin - (x + 1)) / margin, 0, 1)
-    right = jnp.clip((margin - (1 - x)) / margin, 0, 1)
-    bottom = jnp.clip((margin - (y + 1)) / margin, 0, 1)
-    top = jnp.clip((margin - (1 - y)) / margin, 0, 1)
-
-    inward_x = left * left - right * right
-    inward_y = bottom * bottom - top * top
-    return strength * jnp.stack([inward_x, inward_y], axis=-1)
+    boundary_radius = 1.0
+    distance_to_boundary = boundary_radius - radius
+    inward = jnp.clip((margin - distance_to_boundary) / margin, 0, 1)
+    direction_to_center = -grid / jnp.maximum(radius, EPS)
+    return strength * inward * inward * direction_to_center
 
 
 @jaxtyped(typechecker=beartype)

@@ -1,5 +1,6 @@
-.DS_STORE
+.DS_Store
 .zed
+.claude/
 
 # Python-generated files
 __pycache__/
@@ -9,6 +10,8 @@ dist/
 wheels/
 *.egg-info
 **/.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv

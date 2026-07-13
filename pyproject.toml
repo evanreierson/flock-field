@@ -19,5 +19,6 @@ lint.ignore = ["F722"]
 dev = [
     "ipykernel>=7.3.0",
     "jupyterlab>=4.6.1",
+    "matplotlib>=3.11.0",
     "ruff>=0.15.21",
 ]

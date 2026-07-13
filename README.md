@@ -21,6 +21,7 @@ uv run jupyter lab
 
 - `flock_field.ipynb` — live animated simulation rendered with ipycanvas
 - `benchmark.ipynb` — step-time benchmarks across flock size, grid size, and kernel radius
+  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/evanreierson/flock-field/blob/main/benchmark.ipynb)
 - `flock_sim.py` — the simulation itself: `Flock` state, field/kernel functions, and `make_update_step` to build a jitted update
 
 ## Tests

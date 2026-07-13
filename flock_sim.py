@@ -62,17 +62,6 @@ def simulation_to_grid(
 
 
 @jaxtyped(typechecker=beartype)
-def simulation_to_canvas(
-    positions: Float[Array, "... 2"],
-    render_grid_size: int,
-) -> Float[Array, "... 2"]:
-    scale = (render_grid_size - 1) / 2
-    x = (jnp.clip(positions[..., 0], -1, 1) + 1) * scale
-    y = (jnp.clip(positions[..., 1], -1, 1) + 1) * scale
-    return jnp.stack([x, y], axis=-1)
-
-
-@jaxtyped(typechecker=beartype)
 def grid_coordinates(
     simulation_grid_size: int,
 ) -> Float[Array, "height width 2"]:
@@ -99,27 +88,30 @@ def local_splat_field(
     index_offsets = jnp.stack([offset_x.ravel(), offset_y.ravel()], axis=-1)
 
     cell_indices = centers[:, None, :] + index_offsets[None, :, :]
-    in_bounds = jnp.all(
-        (0 <= cell_indices) & (cell_indices < simulation_grid_size),
-        axis=-1,
-    )
 
     scale = (simulation_grid_size - 1) / 2
     cell_positions = cell_indices.astype(positions.dtype) / scale - 1
     simulation_offsets = cell_positions - positions[:, None, :]
     values = kernel(simulation_offsets)
-    values = jnp.where(in_bounds[:, :, None], values, jnp.zeros_like(values))
 
-    safe_indices = jnp.clip(cell_indices, 0, simulation_grid_size - 1)
+    scatter_indices = jnp.where(cell_indices < 0, simulation_grid_size, cell_indices)
     field = jnp.zeros(
         (simulation_grid_size, simulation_grid_size, 2),
         dtype=positions.dtype,
     )
-    return field.at[safe_indices[:, :, 1], safe_indices[:, :, 0]].add(values)
+    return field.at[scatter_indices[:, :, 1], scatter_indices[:, :, 0]].add(
+        values, mode="drop"
+    )
+
+
+@beartype
+def default_kernel_radius(sigma: float, simulation_grid_size: int) -> int:
+    sigma_cells = sigma * (simulation_grid_size - 1) / 2
+    return max(1, math.ceil(3 * sigma_cells))
 
 
 @jaxtyped(typechecker=beartype)
-def separation_kernel(
+def radial_kernel(
     offset: Float[Array, "... 2"],
     sigma: float,
     strength: float,
@@ -137,31 +129,13 @@ def separation_field(
     simulation_grid_size: int,
     sigma: float,
     strength: float,
-    kernel_radius: int | None = None,
 ) -> Float[Array, "height width 2"]:
-    if kernel_radius is None:
-        sigma_cells = sigma * (simulation_grid_size - 1) / 2
-        kernel_radius = max(1, math.ceil(3 * sigma_cells))
-
     return local_splat_field(
         flock.positions,
         simulation_grid_size,
-        kernel_radius,
-        lambda offset: separation_kernel(offset, sigma, strength),
+        default_kernel_radius(sigma, simulation_grid_size),
+        lambda offset: radial_kernel(offset, sigma, strength),
     )
-
-
-@jaxtyped(typechecker=beartype)
-def cohesion_kernel(
-    offset: Float[Array, "... 2"],
-    sigma: float,
-    strength: float,
-) -> Float[Array, "... 2"]:
-    distance_squared = jnp.sum(offset * offset, axis=-1, keepdims=True)
-    distance = jnp.sqrt(distance_squared + EPS)
-    sigma_squared = jnp.maximum(sigma * sigma, EPS)
-    gaussian = jnp.exp(-distance_squared / (2 * sigma_squared))
-    return -strength * gaussian * offset / distance
 
 
 @jaxtyped(typechecker=beartype)
@@ -170,17 +144,12 @@ def cohesion_field(
     simulation_grid_size: int,
     sigma: float,
     strength: float,
-    kernel_radius: int | None = None,
 ) -> Float[Array, "height width 2"]:
-    if kernel_radius is None:
-        sigma_cells = sigma * (simulation_grid_size - 1) / 2
-        kernel_radius = max(1, math.ceil(3 * sigma_cells))
-
     return local_splat_field(
         flock.positions,
         simulation_grid_size,
-        kernel_radius,
-        lambda offset: cohesion_kernel(offset, sigma, strength),
+        default_kernel_radius(sigma, simulation_grid_size),
+        lambda offset: radial_kernel(offset, sigma, -strength),
     )
 
 
@@ -203,16 +172,11 @@ def alignment_field(
     simulation_grid_size: int,
     sigma: float,
     strength: float,
-    kernel_radius: int | None = None,
 ) -> Float[Array, "height width 2"]:
-    if kernel_radius is None:
-        sigma_cells = sigma * (simulation_grid_size - 1) / 2
-        kernel_radius = max(1, math.ceil(3 * sigma_cells))
-
     return local_splat_field(
         flock.positions,
         simulation_grid_size,
-        kernel_radius,
+        default_kernel_radius(sigma, simulation_grid_size),
         lambda offset: alignment_kernel(offset, flock.headings, sigma, strength),
     )
 
@@ -297,9 +261,6 @@ def update_flock(
     noise_strength: float = 0.0,
     noise_grid_size: int = 4,
     noise_temporal_rate: float = 0.025,
-    separation_kernel_radius: int | None = None,
-    cohesion_kernel_radius: int | None = None,
-    alignment_kernel_radius: int | None = None,
 ) -> Flock:
     next_generation = flock.generation + jnp.array(1, dtype=flock.generation.dtype)
     field = boundary_field(
@@ -320,21 +281,18 @@ def update_flock(
         simulation_grid_size=simulation_grid_size,
         sigma=sigma,
         strength=separation_strength,
-        kernel_radius=separation_kernel_radius,
     )
     field = field + cohesion_field(
         flock=flock,
         simulation_grid_size=simulation_grid_size,
         sigma=cohesion_sigma,
         strength=cohesion_strength,
-        kernel_radius=cohesion_kernel_radius,
     )
     field = field + alignment_field(
         flock=flock,
         simulation_grid_size=simulation_grid_size,
         sigma=alignment_sigma,
         strength=alignment_strength,
-        kernel_radius=alignment_kernel_radius,
     )
     influence = sample_field_bilinear(field, flock.positions)
     headings = normalize(flock.headings + turn_rate * influence)
@@ -359,9 +317,6 @@ def make_update_step(
     noise_strength: float = 0.0,
     noise_grid_size: int = 4,
     noise_temporal_rate: float = 0.025,
-    separation_kernel_radius: int | None = None,
-    cohesion_kernel_radius: int | None = None,
-    alignment_kernel_radius: int | None = None,
 ) -> Callable[[Flock], Flock]:
     """Return a jitted flock update with static simulation configuration."""
     return jax.jit(
@@ -382,8 +337,5 @@ def make_update_step(
             noise_strength=noise_strength,
             noise_grid_size=noise_grid_size,
             noise_temporal_rate=noise_temporal_rate,
-            separation_kernel_radius=separation_kernel_radius,
-            cohesion_kernel_radius=cohesion_kernel_radius,
-            alignment_kernel_radius=alignment_kernel_radius,
         )
     )

@@ -94,6 +94,11 @@ def local_splat_field(
     simulation_offsets = cell_positions - positions[:, None, :]
     values = kernel(simulation_offsets)
 
+    # This scatter-add is fast on GPU (atomics) and CPU, but TPUs serialize
+    # scatters with colliding indices, making it the bottleneck there. If TPU
+    # performance ever matters: the summed field equals a per-bird point
+    # deposit convolved with the kernel, so deposit birds bilinearly (a tiny
+    # scatter) and convolve once instead.
     scatter_indices = jnp.where(cell_indices < 0, simulation_grid_size, cell_indices)
     field = jnp.zeros(
         (simulation_grid_size, simulation_grid_size, 2),

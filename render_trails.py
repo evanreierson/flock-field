@@ -2,8 +2,10 @@
 
 Runs the flock simulation with jax.lax.scan and rasterizes every frame on
 device. Each frame the trail buffer decays exponentially, then every bird
-deposits a small Gaussian sprite colored by its heading. Frames are streamed
-as raw RGB to ffmpeg, so the only external requirement is an ffmpeg binary.
+deposits a small Gaussian sprite colored by its heading. Alongside the trails
+it renders the combined steering field as in the flock_field notebook (hue =
+direction, brightness = magnitude). Frames are streamed as raw RGB to ffmpeg,
+so the only external requirement is an ffmpeg binary.
 
     uv run python render_trails.py trails.mp4
 
@@ -18,8 +20,20 @@ import sys
 
 import jax
 import jax.numpy as jnp
+from jax.scipy.ndimage import map_coordinates
 
-from flock_sim import initialize_flock, make_update_step, simulation_to_grid
+from flock_sim import (
+    alignment_field,
+    boundary_field,
+    cohesion_field,
+    initialize_flock,
+    make_update_step,
+    noise_field,
+    separation_field,
+    simulation_to_grid,
+)
+
+EPS = 1e-8
 
 SIM_PARAMS = dict(
     simulation_grid_size=128,
@@ -45,7 +59,7 @@ WARMUP_STEPS = 300  # simulation steps before recording
 
 SECONDS = 60.0
 FPS = 60
-SIZE = 900  # output resolution (px); must be even for yuv420p
+SIZE = 900  # panel resolution (px); must be even for yuv420p
 
 BACKGROUND = jnp.array([8.0, 10.0, 14.0]) / 255.0
 TRAIL_SATURATION = 0.8
@@ -54,7 +68,13 @@ TRAIL_SIGMA_PX = 1.6  # trail sprite radius (px std dev)
 EXPOSURE = 0.4  # tonemap gain; higher saturates trails sooner
 DEPOSITS_PER_FRAME = 4  # trail deposits along each bird's movement segment
 
+SHOW_FIELD = True  # render the combined-field panel left of the trails
+FIELD_SATURATION = 0.85
+DIVIDER_PX = 4  # gap between the two panels
+
 CHUNK = 32  # frames per scan chunk
+
+FRAME_WIDTH = 2 * SIZE + DIVIDER_PX if SHOW_FIELD else SIZE
 
 
 def hsv_to_rgb(hue, saturation, value):
@@ -92,8 +112,65 @@ def heading_colors(headings):
     return hsv_to_rgb(hue, TRAIL_SATURATION, jnp.ones_like(hue))
 
 
+def make_combined_field():
+    boundary = boundary_field(
+        simulation_grid_size=SIM_PARAMS["simulation_grid_size"],
+        margin=SIM_PARAMS["boundary_margin"],
+        strength=SIM_PARAMS["boundary_strength"],
+    )
+
+    def combined(flock):
+        return (
+            boundary
+            + noise_field(
+                generation=flock.generation,
+                simulation_grid_size=SIM_PARAMS["simulation_grid_size"],
+                strength=SIM_PARAMS["noise_strength"],
+                noise_grid_size=SIM_PARAMS["noise_grid_size"],
+                temporal_rate=SIM_PARAMS["noise_temporal_rate"],
+            )
+            + separation_field(
+                flock=flock,
+                simulation_grid_size=SIM_PARAMS["simulation_grid_size"],
+                sigma=SIM_PARAMS["sigma"],
+                strength=SIM_PARAMS["separation_strength"],
+            )
+            + cohesion_field(
+                flock=flock,
+                simulation_grid_size=SIM_PARAMS["simulation_grid_size"],
+                sigma=SIM_PARAMS["cohesion_sigma"],
+                strength=SIM_PARAMS["cohesion_strength"],
+            )
+            + alignment_field(
+                flock=flock,
+                simulation_grid_size=SIM_PARAMS["simulation_grid_size"],
+                sigma=SIM_PARAMS["alignment_sigma"],
+                strength=SIM_PARAMS["alignment_strength"],
+            )
+        )
+
+    return combined
+
+
+def field_panel(field):
+    grid_size = field.shape[0]
+    axis = jnp.linspace(0, grid_size - 1, SIZE)
+    rows, cols = jnp.meshgrid(axis, axis, indexing="ij")
+    coords = jnp.stack([rows, cols])
+    x = map_coordinates(field[:, :, 0], coords, order=1)
+    y = map_coordinates(field[:, :, 1], coords, order=1)
+
+    magnitude = jnp.log1p(jnp.sqrt(x * x + y * y))
+    magnitude = magnitude / jnp.maximum(jnp.max(magnitude), EPS)
+    hue = (jnp.arctan2(y, x) + jnp.pi) / (2.0 * jnp.pi)
+    value = 0.12 + 0.88 * magnitude
+    return hsv_to_rgb(hue, FIELD_SATURATION, value)
+
+
 def make_render_chunk(update_step):
     decay = 0.5 ** (1.0 / (FPS * TRAIL_HALF_LIFE))
+    combined = make_combined_field()
+    divider = jnp.broadcast_to(BACKGROUND, (SIZE, DIVIDER_PX, 3))
     # Deposit along the segment travelled this frame (birds move several
     # pixels per frame, a single sprite per frame reads as beads).
     fractions = (
@@ -122,6 +199,8 @@ def make_render_chunk(update_step):
 
         glow = 1.0 - jnp.exp(-EXPOSURE * trail)
         rgb = jnp.clip(BACKGROUND + glow, 0.0, 1.0)
+        if SHOW_FIELD:
+            rgb = jnp.concatenate([field_panel(combined(flock)), divider, rgb], axis=1)
         frame = jnp.round(rgb * 255).astype(jnp.uint8)
         return (flock, trail), frame
 
@@ -136,8 +215,8 @@ def main():
     parser.add_argument("output", nargs="?", default="trails.mp4")
     args = parser.parse_args()
 
-    if SIZE % 2:
-        sys.exit("SIZE must be even (yuv420p requires even dimensions)")
+    if SIZE % 2 or FRAME_WIDTH % 2:
+        sys.exit("frame dimensions must be even (yuv420p requirement)")
     if shutil.which("ffmpeg") is None:
         sys.exit("ffmpeg not found on PATH")
 
@@ -167,7 +246,7 @@ def main():
             "-pix_fmt",
             "rgb24",
             "-s",
-            f"{SIZE}x{SIZE}",
+            f"{FRAME_WIDTH}x{SIZE}",
             "-r",
             str(FPS),
             "-i",

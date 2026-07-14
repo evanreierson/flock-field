@@ -10,6 +10,8 @@ bird then steers by bilinearly sampling the combined field at its own
 position. The whole update step is JIT-compiled and runs at hundreds of steps
 per second for a 1000-bird flock on CPU (see `benchmark.ipynb`).
 
+https://github.com/user-attachments/assets/f51b3d69-e78f-4637-bfc4-e0676e773c77
+
 ## Getting started
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
